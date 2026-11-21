@@ -240,6 +240,45 @@ class TestHighlightsDetect:
         )
 
 
+class TestJudgeEdgesAreKept:
+    """The judge's word range survives refinement; only silence alignment applies."""
+
+    def detect(self, provider, transcript, clips: list[dict]):
+        write_selection(clips)
+        return asyncio.run(highlights.detect(transcript, provider, DetectionConfig(), job_id=JOB))
+
+    def test_mid_sentence_edges_are_not_snapped(self, provider, transcript) -> None:
+        # Sentences end at every tenth word; 3 and 62 are mid-sentence.
+        (kept,) = self.detect(provider, transcript, [clip(3, 62)])
+
+        assert (kept.start_word, kept.end_word) == (3, 62)
+        # Silence alignment may add a short lead-in, never a whole word.
+        assert 3 * WORD_S - 0.3 <= kept.start_s <= 3 * WORD_S
+
+    def test_short_clip_is_dropped_not_stretched(self, provider, transcript, caplog) -> None:
+        # 3..20 is about 8.9 s, under the 20 s minimum.
+        with caplog.at_level("WARNING"):
+            clips = self.detect(provider, transcript, [clip(3, 20), clip(100, 179)])
+
+        assert [c.start_word for c in clips] == [100]
+        assert "Dropped candidate 3-20" in caplog.text
+
+    def test_long_clip_is_dropped_not_trimmed(self, provider) -> None:
+        long_transcript = make_transcript(400)  # 200 s of words
+
+        clips = self.detect(provider, long_transcript, [clip(0, 399)])
+
+        assert clips == []
+
+    def test_model_providers_still_snap(self, transcript) -> None:
+        from autoclip.pipeline import boundaries
+
+        snapped = boundaries.refine(transcript, 3, 62)
+
+        # Word 62 snaps to the nearest sentence end (59), start to 0.
+        assert (snapped.start_word, snapped.end_word) == (0, 59)
+
+
 class TestPauseAndResume:
     """A job waits at highlights, then resumes there once selection.json exists."""
 
