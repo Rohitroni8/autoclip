@@ -157,6 +157,7 @@ def pipeline_result(autoclip_home):
     settings.clips.max_duration_s = 45.0
     settings.export.caption_style = "bold_pop"
     settings.export.ratio = "9:16"
+    settings.export.auto_export = True  # this test checks the rendered files
 
     job = store.create_job(Job(id=new_id(), source_id=source.id, provider="scripted", settings={}))
 
