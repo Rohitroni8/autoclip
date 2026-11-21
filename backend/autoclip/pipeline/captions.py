@@ -34,6 +34,69 @@ DEFAULT_MAX_GAP_S = 0.4
 #: output size, so a preset looks identical at 9:16, 1:1, and 16:9.
 REFERENCE_HEIGHT = 1920
 
+#: Bundled OFL font for Hindi and other Devanagari text. The preset fonts
+#: (Anton, Inter) have no Devanagari, and without this libass silently falls
+#: back to whatever system font it finds — on Windows, Nirmala UI.
+DEVANAGARI_FONT = "Noto Sans Devanagari"
+DEVANAGARI_FONT_FILES = ("NotoSansDevanagari-Regular.ttf", "NotoSansDevanagari-Bold.ttf")
+#: libass sizes text by the font's ascent + descent, and Noto Sans Devanagari
+#: reserves far more of that for vowel signs than Anton or Inter do, so at the
+#: same size its letters come out about two thirds as tall. 1.5 brings the
+#: Devanagari body (up to the headline) level with the presets' capitals:
+#: cap height / (winAscent + winDescent) is 0.496 for Anton and 0.509 for
+#: Inter, against 0.326 for the Devanagari body.
+DEVANAGARI_SIZE_SCALE = 1.5
+
+
+def _needs_devanagari_font(char: str) -> bool:
+    """True for characters only the Devanagari font can draw.
+
+    Covers the Devanagari block (dandas included), Devanagari Extended and
+    Vedic Extensions, plus the zero-width joiners that shape conjuncts. Latin,
+    digits and ASCII punctuation stay in the preset font, which has them; the
+    Devanagari font has no Latin letters at all.
+    """
+    code = ord(char)
+    return (
+        0x0900 <= code <= 0x097F
+        or 0xA8E0 <= code <= 0xA8FF
+        or 0x1CD0 <= code <= 0x1CFF
+        or code in (0x200C, 0x200D)
+    )
+
+
+def with_script_fonts(text: str, base_font: str, base_size: int | None = None) -> str:
+    r"""Wrap Devanagari runs in ``\fn`` overrides so each run uses a bundled font.
+
+    Switching per run rather than per word keeps mixed Hinglish words and
+    trailing punctuation ("है?") on fonts that actually contain the glyphs.
+    Given ``base_size`` (the style's font size in pixels), each run also sets
+    ``\fs`` so Devanagari matches the Latin letter height; see
+    :data:`DEVANAGARI_SIZE_SCALE`.
+    """
+    if not any(_needs_devanagari_font(c) for c in text):
+        return text
+
+    if base_size is None:
+        enter = f"{{\\fn{DEVANAGARI_FONT}}}"
+        leave = f"{{\\fn{base_font}}}"
+    else:
+        enter = f"{{\\fn{DEVANAGARI_FONT}\\fs{round(base_size * DEVANAGARI_SIZE_SCALE)}}}"
+        leave = f"{{\\fn{base_font}\\fs{base_size}}}"
+
+    parts: list[str] = []
+    in_devanagari = False
+    for char in text:
+        needs = _needs_devanagari_font(char)
+        # Spaces inside a Devanagari run don't end it.
+        if needs != in_devanagari and not (in_devanagari and char == " "):
+            parts.append(enter if needs else leave)
+            in_devanagari = needs
+        parts.append(char)
+    if in_devanagari:
+        parts.append(leave)
+    return "".join(parts)
+
 
 def hex_to_ass(colour: str, alpha: int = 0) -> pysubs2.Color:
     """Convert ``#RRGGBB`` to a pysubs2 colour.
@@ -267,14 +330,15 @@ def build_ass(
     subs.styles[STYLE_NAME] = _build_ass_style(style, height=height, scale=scale)
 
     groups = group_words(words, max_words=style.max_words)
+    size = int(subs.styles[STYLE_NAME].fontsize)
 
     for group in groups:
         if style.animation == "karaoke":
-            subs.events.append(_karaoke_event(group, style, time_offset_s))
+            subs.events.append(_karaoke_event(group, style, time_offset_s, size=size))
         elif style.animation == "scale" and style.accent:
-            subs.events.extend(_per_word_events(group, style, time_offset_s))
+            subs.events.extend(_per_word_events(group, style, time_offset_s, size=size))
         else:
-            subs.events.append(_static_event(group, style, time_offset_s))
+            subs.events.append(_static_event(group, style, time_offset_s, size=size))
 
     return subs
 
@@ -298,9 +362,11 @@ def _build_ass_style(style: CaptionStyle, *, height: int, scale: float) -> pysub
     return ass_style
 
 
-def _text_of(word: Word, style: CaptionStyle) -> str:
+def _text_of(word: Word, style: CaptionStyle, size: int | None = None) -> str:
     text = word.text.strip()
-    return text.upper() if style.all_caps else text
+    if style.all_caps:
+        text = text.upper()
+    return with_script_fonts(text, style.font, size)
 
 
 def _event(start_s: float, end_s: float, text: str, offset: float) -> pysubs2.SSAEvent:
@@ -312,12 +378,16 @@ def _event(start_s: float, end_s: float, text: str, offset: float) -> pysubs2.SS
     )
 
 
-def _static_event(group: CaptionGroup, style: CaptionStyle, offset: float) -> pysubs2.SSAEvent:
-    text = " ".join(_text_of(w, style) for w in group.words)
+def _static_event(
+    group: CaptionGroup, style: CaptionStyle, offset: float, *, size: int | None = None
+) -> pysubs2.SSAEvent:
+    text = " ".join(_text_of(w, style, size) for w in group.words)
     return _event(group.start, group.end, text, offset)
 
 
-def _karaoke_event(group: CaptionGroup, style: CaptionStyle, offset: float) -> pysubs2.SSAEvent:
+def _karaoke_event(
+    group: CaptionGroup, style: CaptionStyle, offset: float, *, size: int | None = None
+) -> pysubs2.SSAEvent:
     r"""Build a ``\kf`` karaoke line.
 
     ``\kf`` sweeps the fill across each word over its own duration; durations
@@ -332,13 +402,13 @@ def _karaoke_event(group: CaptionGroup, style: CaptionStyle, offset: float) -> p
             gap = group.words[index + 1].start - word.end
             if 0 < gap < 0.5:
                 duration_cs += round(gap * 100)
-        parts.append(f"{{\\kf{duration_cs}}}{_text_of(word, style)}")
+        parts.append(f"{{\\kf{duration_cs}}}{_text_of(word, style, size)}")
 
     return _event(group.start, group.end, " ".join(parts), offset)
 
 
 def _per_word_events(
-    group: CaptionGroup, style: CaptionStyle, offset: float
+    group: CaptionGroup, style: CaptionStyle, offset: float, *, size: int | None = None
 ) -> list[pysubs2.SSAEvent]:
     """Emit one event per word, highlighting the active one.
 
@@ -352,7 +422,7 @@ def _per_word_events(
     for active, word in enumerate(group.words):
         rendered: list[str] = []
         for index, other in enumerate(group.words):
-            text = _text_of(other, style)
+            text = _text_of(other, style, size)
             if index == active:
                 rendered.append(f"{{{accent_tag}\\fscx{scale}\\fscy{scale}}}{text}{{\\r}}")
             else:
