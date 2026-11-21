@@ -45,6 +45,27 @@ class Strategy(StrEnum):
     WIDE = "wide"
     #: No usable face; centre crop, optionally with a slow push-in.
     GENERAL = "general"
+    #: A facecam overlay over gameplay: the facecam in a band on top, the
+    #: gameplay enlarged below it.
+    STACKED = "stacked"
+
+
+@dataclass
+class Rect:
+    """A rectangle in source pixels."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+    @property
+    def right(self) -> float:
+        return self.x + self.width
+
+    @property
+    def bottom(self) -> float:
+        return self.y + self.height
 
 
 @dataclass
@@ -70,12 +91,26 @@ class CropSegment:
     #: Fit the whole source frame into the output instead of cropping, filling
     #: the remainder with a blurred copy. Used when the subjects are spread
     #: wider than any crop of the target ratio can hold — cropping there would
-    #: cut someone out of frame, which the acceptance bar forbids.
+    #: cut someone out of frame, which the acceptance bar forbids. The fitted
+    #: region is the window given by ``width``/``height`` at the first keyframe:
+    #: usually the whole frame, or the part above the source's own subtitles.
     fit: bool = False
+    #: For STACKED segments: the facecam region shown in the top band. The
+    #: window (``width``/``height`` at the first keyframe) is the gameplay,
+    #: fitted into the band below.
+    stack_top: Rect | None = None
+    #: Fraction of the output height given to the top band.
+    stack_split: float = 0.0
 
     @property
     def duration_s(self) -> float:
         return self.end_s - self.start_s
+
+    @property
+    def window(self) -> Rect:
+        """The (first) crop window: the region a fit or the gameplay band shows."""
+        first = self.keyframes[0] if self.keyframes else CropKeyframe(0.0, 0.0, 0.0)
+        return Rect(first.x, first.y, self.width, self.height)
 
     @property
     def is_static(self) -> bool:
@@ -123,6 +158,8 @@ class CropPath:
                     strategy=Strategy(raw.get("strategy", "general")),
                     zoom=raw.get("zoom", 0.0),
                     fit=raw.get("fit", False),
+                    stack_top=Rect(**raw["stack_top"]) if raw.get("stack_top") else None,
+                    stack_split=raw.get("stack_split", 0.0),
                 )
             )
         return cls(
