@@ -249,6 +249,11 @@ def build_clips(
                 hook=candidate.hook.strip(),
                 score=candidate.score,
                 reason=candidate.reason.strip(),
+                score_hook=candidate.score_hook,
+                score_story=candidate.score_story,
+                score_engagement=candidate.score_engagement,
+                score_standalone=candidate.score_standalone,
+                hook_headline=candidate.hook_headline.strip(),
             )
         )
 

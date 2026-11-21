@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,34 @@ class ProviderError(RuntimeError):
 # --------------------------------------------------------------------------
 
 
+#: Weight of each sub-score in the total, in percent. Hook dominates because
+#: the first three seconds decide whether anyone sees the rest.
+SCORE_WEIGHTS: dict[str, int] = {
+    "score_hook": 35,
+    "score_standalone": 25,
+    "score_story": 20,
+    "score_engagement": 20,
+}
+
+
+def weighted_score(
+    score_hook: int, score_story: int, score_engagement: int, score_standalone: int
+) -> int:
+    """Combine four 0-10 sub-scores into the 0-100 total.
+
+    ``round(10 * (0.35*hook + 0.25*standalone + 0.20*story + 0.20*engagement))``,
+    computed in integers so halves always round up instead of depending on
+    float error or banker's rounding.
+    """
+    per_mille = (
+        SCORE_WEIGHTS["score_hook"] * score_hook
+        + SCORE_WEIGHTS["score_standalone"] * score_standalone
+        + SCORE_WEIGHTS["score_story"] * score_story
+        + SCORE_WEIGHTS["score_engagement"] * score_engagement
+    )
+    return (per_mille + 5) // 10
+
+
 class ClipCandidate(BaseModel):
     """One proposed clip, as returned by the model."""
 
@@ -61,12 +89,47 @@ class ClipCandidate(BaseModel):
     hook: str = ""
     score: int = Field(default=50, ge=0, le=100)
     reason: str = ""
+    #: The four judged dimensions, 0-10 each (prompt highlight_v2). Optional so
+    #: providers on highlight_v1 keep working; when all four are present,
+    #: ``score`` is their weighted total.
+    score_hook: int | None = None
+    score_story: int | None = None
+    score_engagement: int | None = None
+    score_standalone: int | None = None
+    #: On-screen headline for the clip's opening seconds.
+    hook_headline: str = ""
 
-    @field_validator("title", "hook", "reason", mode="before")
+    @field_validator("title", "hook", "reason", "hook_headline", mode="before")
     @classmethod
     def _coerce_to_string(cls, value: Any) -> str:
         # Models occasionally return null or a number where text was asked for.
         return "" if value is None else str(value)
+
+    @field_validator(
+        "score_hook", "score_story", "score_engagement", "score_standalone", mode="before"
+    )
+    @classmethod
+    def _coerce_subscore(cls, value: Any) -> int | None:
+        """Accept floats and clamp to 0-10; anything unreadable counts as missing."""
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0, min(10, round(number)))
+
+    @model_validator(mode="after")
+    def _total_from_subscores(self) -> ClipCandidate:
+        subscores = (
+            self.score_hook,
+            self.score_story,
+            self.score_engagement,
+            self.score_standalone,
+        )
+        if all(s is not None for s in subscores):
+            self.score = weighted_score(*subscores)  # type: ignore[arg-type]
+        return self
 
     @field_validator("score", mode="before")
     @classmethod

@@ -59,11 +59,21 @@ def clip(start: int = 0, end: int = 79, **overrides) -> dict:
         "score_story": 7,
         "score_engagement": 7,
         "score_standalone": 8,
-        "score": 77,
+        "score": 76,  # weighted total of the four above
         "reason": "Opens on tension and pays off.",
     }
     data.update(overrides)
     return data
+
+
+#: Sub-scores for a weaker clip, and their weighted total.
+LOWER = {
+    "score_hook": 5,
+    "score_story": 6,
+    "score_engagement": 6,
+    "score_standalone": 6,
+    "score": 57,
+}
 
 
 def write_selection(
@@ -169,12 +179,12 @@ class TestInvalidFile:
 
 class TestValidFile:
     def test_candidates_carry_the_selection(self, provider, transcript) -> None:
-        write_selection([clip(0, 79), clip(100, 179, score=60)])
+        write_selection([clip(0, 79), clip(100, 179, **LOWER)])
 
         candidates = provider.select(transcript, job_id=JOB)
 
         assert [(c.start_word_index, c.end_word_index) for c in candidates] == [(0, 79), (100, 179)]
-        assert candidates[0].score == 77
+        assert candidates[0].score == 76
         assert candidates[0].title == "A specific title"
         assert candidates[0].hook == "w0 w1 w2"
 
@@ -223,12 +233,12 @@ class TestHighlightsDetect:
             raise AssertionError("external selection must not be windowed")
 
         monkeypatch.setattr(highlights, "build_windows", no_windows)
-        write_selection([clip(0, 79), clip(100, 179, score=60)])
+        write_selection([clip(0, 79), clip(100, 179, **LOWER)])
 
         clips = asyncio.run(highlights.detect(transcript, provider, DetectionConfig(), job_id=JOB))
 
         assert [c.rank for c in clips] == [1, 2]
-        assert clips[0].score == 77
+        assert clips[0].score == 76
         assert clips[0].start_word == 0
 
     def test_empty_selection_yields_no_clips(self, provider, transcript) -> None:

@@ -151,6 +151,11 @@ class ClipOut(BaseModel):
     reason: str
     status: str
     user_trimmed: bool
+    score_hook: int | None = None
+    score_story: int | None = None
+    score_engagement: int | None = None
+    score_standalone: int | None = None
+    hook_headline: str = ""
     caption_style: str = "bold_pop"
     ratio: str = "9:16"
     exports: list[ExportOut] = Field(default_factory=list)
@@ -178,6 +183,11 @@ class ClipOut(BaseModel):
             reason=clip.reason,
             status=clip.status,
             user_trimmed=clip.user_trimmed,
+            score_hook=clip.score_hook,
+            score_story=clip.score_story,
+            score_engagement=clip.score_engagement,
+            score_standalone=clip.score_standalone,
+            hook_headline=clip.hook_headline,
             caption_style=edit.caption_style if edit else "bold_pop",
             ratio=edit.ratio if edit else "9:16",
             exports=[ExportOut.of(e) for e in (exports or [])],

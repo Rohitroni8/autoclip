@@ -141,6 +141,13 @@ class Clip:
     status: ClipStatus = "candidate"
     user_trimmed: bool = False
     created_at: str = field(default_factory=utcnow)
+    #: Per-dimension scores, 0-10. None for clips without them (older jobs,
+    #: providers on prompt highlight_v1).
+    score_hook: int | None = None
+    score_story: int | None = None
+    score_engagement: int | None = None
+    score_standalone: int | None = None
+    hook_headline: str = ""
 
     @property
     def duration_s(self) -> float:
@@ -163,6 +170,11 @@ class Clip:
             status=row["status"],
             user_trimmed=bool(row["user_trimmed"]),
             created_at=row["created_at"],
+            score_hook=row["score_hook"],
+            score_story=row["score_story"],
+            score_engagement=row["score_engagement"],
+            score_standalone=row["score_standalone"],
+            hook_headline=row["hook_headline"],
         )
 
 
