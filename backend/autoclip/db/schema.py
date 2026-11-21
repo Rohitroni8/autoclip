@@ -104,9 +104,27 @@ def _migration_v1(conn: sqlite3.Connection) -> None:
     conn.executescript(_V1)
 
 
+def _migration_v2(conn: sqlite3.Connection) -> None:
+    """Per-dimension clip scores and the on-screen hook headline.
+
+    The sub-scores are nullable: clips detected before this migration, or by a
+    provider still on prompt highlight_v1, have only the total.
+    """
+    # Separate execute() calls rather than executescript(), which commits first
+    # and would split the migration from its user_version bump.
+    for column in (
+        "score_hook INTEGER",
+        "score_story INTEGER",
+        "score_engagement INTEGER",
+        "score_standalone INTEGER",
+        "hook_headline TEXT NOT NULL DEFAULT ''",
+    ):
+        conn.execute(f"ALTER TABLE clips ADD COLUMN {column}")
+
+
 #: Ordered migrations. Index + 1 is the resulting ``user_version``.
 #: Append only — never edit a migration that has shipped.
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migration_v1]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migration_v1, _migration_v2]
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

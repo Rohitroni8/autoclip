@@ -26,7 +26,14 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .. import paths
 from ..pipeline.transcript import Transcript
-from .base import ClipCandidate, DetectionConfig, LLMProvider, ProviderError, ProviderStatus
+from .base import (
+    ClipCandidate,
+    DetectionConfig,
+    LLMProvider,
+    ProviderError,
+    ProviderStatus,
+    weighted_score,
+)
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +66,19 @@ class SelectedClip(BaseModel):
     def _end_after_start(self) -> SelectedClip:
         if self.end_word_index <= self.start_word_index:
             raise ValueError("end_word_index must be greater than start_word_index")
+        return self
+
+    @model_validator(mode="after")
+    def _score_is_the_weighted_total(self) -> SelectedClip:
+        # One point of slack for rounding a half by hand.
+        expected = weighted_score(
+            self.score_hook, self.score_story, self.score_engagement, self.score_standalone
+        )
+        if abs(self.score - expected) > 1:
+            raise ValueError(
+                f"score {self.score} is not the weighted total of the sub-scores "
+                f"(expected {expected})"
+            )
         return self
 
 
@@ -189,6 +209,11 @@ class ExternalProvider(LLMProvider):
                     hook=clip.hook,
                     score=clip.score,
                     reason=clip.reason,
+                    score_hook=clip.score_hook,
+                    score_story=clip.score_story,
+                    score_engagement=clip.score_engagement,
+                    score_standalone=clip.score_standalone,
+                    hook_headline=clip.hook_headline,
                 )
             )
 

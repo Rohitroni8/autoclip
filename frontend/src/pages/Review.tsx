@@ -245,6 +245,17 @@ export function Review() {
                   )}
                 </div>
 
+                {selected.hook_headline && (
+                  <div>
+                    <p className="eyebrow">On-screen headline</p>
+                    <p className="mt-2 font-display text-xl leading-snug text-ink-100">
+                      {selected.hook_headline}
+                    </p>
+                  </div>
+                )}
+
+                <ScoreBreakdown clip={selected} />
+
                 <CaptionEditor
                   words={words}
                   onChange={(next) => {
@@ -417,6 +428,48 @@ function ClipRow({
           </span>
         </div>
       </div>
+    </div>
+  )
+}
+
+// Weights match the backend's weighted total (providers/base.py SCORE_WEIGHTS).
+const SUBSCORES = [
+  { key: 'score_hook', label: 'Hook', weight: 35 },
+  { key: 'score_standalone', label: 'Standalone', weight: 25 },
+  { key: 'score_story', label: 'Story', weight: 20 },
+  { key: 'score_engagement', label: 'Engagement', weight: 20 },
+] as const
+
+function ScoreBreakdown({ clip }: { clip: Clip }) {
+  // Clips detected before per-dimension scoring have only the total.
+  if (SUBSCORES.every(({ key }) => clip[key] === null || clip[key] === undefined)) return null
+
+  return (
+    <div>
+      <p className="eyebrow">
+        Score <span className="numeric text-ink-300">{clip.score}</span>
+      </p>
+      <dl className="mt-3 space-y-2">
+        {SUBSCORES.map(({ key, label, weight }) => {
+          const value = clip[key]
+          return (
+            <div key={key} className="grid grid-cols-[6.5rem_1fr_2.5rem] items-center gap-3">
+              <dt className="text-xs text-ink-400">
+                {label} <span className="text-ink-600">{weight}%</span>
+              </dt>
+              <dd className="h-1.5 overflow-hidden rounded-full bg-ink-850">
+                <div
+                  className={value !== null && value >= 8 ? 'h-full bg-sodium-500' : 'h-full bg-ink-500'}
+                  style={{ width: `${(value ?? 0) * 10}%` }}
+                />
+              </dd>
+              <dd className="numeric text-right text-xs text-ink-300">
+                {value === null ? '–' : `${value}/10`}
+              </dd>
+            </div>
+          )
+        })}
+      </dl>
     </div>
   )
 }
