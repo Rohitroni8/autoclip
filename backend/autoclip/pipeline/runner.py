@@ -70,6 +70,20 @@ class ProgressEvent:
 ProgressHandler = Callable[[ProgressEvent], None]
 
 
+def job_settings(job: Job) -> Settings:
+    """The settings a job was created with, falling back to the saved config.
+
+    ``POST /api/jobs`` stores a snapshot with the per-job overrides (language,
+    Whisper model, clip limits, caption style) applied. Running from that
+    snapshot is what makes those overrides take effect, and keeps a queued job
+    from changing behaviour if the global config is edited while it waits.
+    Jobs created without a snapshot (older rows, the CLI) use the saved config.
+    """
+    if job.settings:
+        return Settings.model_validate(job.settings)
+    return load_settings()
+
+
 class JobWorkspace:
     """Paths for one job's intermediate artifacts."""
 
@@ -115,7 +129,7 @@ class PipelineRunner:
     ) -> None:
         self.job = job
         self.source = source
-        self.settings = settings or load_settings()
+        self.settings = settings or job_settings(job)
         self.on_progress = on_progress
         self._is_cancelled = is_cancelled or (lambda: False)
         self.workspace = JobWorkspace(job.id)
