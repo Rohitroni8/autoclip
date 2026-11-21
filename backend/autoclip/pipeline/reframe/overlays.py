@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import statistics
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -157,12 +157,23 @@ FACECAM_MAX_AREA = 0.30
 #: Facecam faces are smallish (a big streamer cam reaches ~25% of the height);
 #: a face taller than this is someone on camera full frame, not a webcam box.
 FACECAM_MAX_FACE_HEIGHT = 0.33
-#: A facecam face is on screen for at least this fraction of the frames in
-#: which any face is seen...
-STABLE_MIN_PRESENCE = 0.3
+#: A facecam face is detected in at least this fraction of all frames sampled
+#: from the clip. Measured against the whole clip, not against the frames that
+#: happen to contain faces: a game character's two-second close-up must not
+#: count as a fixture just because the facecam itself is hard to detect.
+STABLE_MIN_PRESENCE = 0.25
 #: ...and its centre wanders by at most this fraction of the frame (standard
 #: deviation). Game characters and people moving through a shot fail this.
 STABLE_MAX_DRIFT = 0.04
+#: Tracks whose centres are within this many face widths/heights of a seat's
+#: centre are the same person in the same facecam spot.
+SEAT_TOLERANCE = 0.5
+#: Other facecam seats need only this presence, if they sit beside the anchor...
+SUPPORT_MIN_PRESENCE = 0.06
+#: ...no more than this many face widths from a seat already in the facecam,
+#: and on screen at the same time as it in at least this fraction of frames.
+SUPPORT_MAX_GAP = 3.5
+MIN_TOGETHER = 0.03
 #: Padding around the faces, in face widths / heights, so the band shows heads,
 #: headsets and shoulders rather than masks of faces.
 PAD_SIDE = 0.6
@@ -171,38 +182,45 @@ PAD_BELOW = 1.3
 
 
 def detect_facecam(
-    tracks: Sequence[FaceTrack], *, source_w: int, source_h: int
+    tracks: Sequence[FaceTrack], *, source_w: int, source_h: int, sampled_frames: int
 ) -> Rect | None:
     """The region where two or more webcam faces sit over other footage, or None.
 
-    A facecam is people who stay put: face tracks that are on screen for much
-    of the clip and barely move. Faces in the footage underneath (game
-    characters, people walking through a shot) come and go or move, so they
-    don't widen the region. Full-frame people (a talking head, a green-screen
-    insert) are too big, or spread too wide, to pass as an overlay.
+    A facecam is people who stay put. Each person becomes a *seat*: the
+    low-drift face tracks found at the same spot, merged, because the tracker
+    splits one person into many short tracks whenever the facecam drops out
+    (B-roll, a missed detection). A seat that is present for much of the clip
+    is a fixture; faces in the footage underneath (game characters, people
+    walking through a shot) come and go or move, so they never form one.
+    Full-frame people (a talking head, a green-screen insert) are too big, or
+    spread too wide, to pass as an overlay.
+
+    ``sampled_frames`` is how many frames face detection looked at across the
+    clip, with or without faces.
     """
-    face_times = {round(o.t, 3) for track in tracks for o in track.observations}
-    if not face_times:
+    if sampled_frames <= 0:
         return None
 
-    stable = [t for t in tracks if _is_stable(t, len(face_times), source_w, source_h)]
-    if len(stable) < 2:
+    seats = _facecam_cluster(
+        _seats(t for t in tracks if _is_steady(t, source_w, source_h)), sampled_frames
+    )
+    if len(seats) < 2:
         return None
 
     def quantile(values: list[float], q: float) -> float:
         ordered = sorted(values)
         return ordered[min(len(ordered) - 1, max(0, round(q * (len(ordered) - 1))))]
 
-    # Robust per-track bounds: a few mis-detections shouldn't stretch the box.
-    left = min(quantile([o.left for o in t.observations], 0.05) for t in stable)
-    right = max(quantile([o.right for o in t.observations], 0.95) for t in stable)
-    top = min(quantile([o.top for o in t.observations], 0.05) for t in stable)
-    bottom = max(quantile([o.bottom for o in t.observations], 0.95) for t in stable)
+    # Robust per-seat bounds: a few mis-detections shouldn't stretch the box.
+    left = min(quantile([o.left for o in seat], 0.05) for seat in seats)
+    right = max(quantile([o.right for o in seat], 0.95) for seat in seats)
+    top = min(quantile([o.top for o in seat], 0.05) for seat in seats)
+    bottom = max(quantile([o.bottom for o in seat], 0.95) for seat in seats)
 
     if (right - left) * (bottom - top) > FACECAM_MAX_AREA * source_w * source_h:
         return None
 
-    observations = [o for t in stable for o in t.observations]
+    observations = [o for seat in seats for o in seat]
     face_w = statistics.median(o.width for o in observations)
     face_h = statistics.median(o.height for o in observations)
     x0 = max(0.0, left - PAD_SIDE * face_w)
@@ -213,11 +231,68 @@ def detect_facecam(
     return Rect(x0, y0, x1 - x0, y1 - y0)
 
 
-def _is_stable(track: FaceTrack, face_frames: int, source_w: int, source_h: int) -> bool:
+def _times(seat: list[FaceObservation]) -> set[float]:
+    return {round(o.t, 3) for o in seat}
+
+
+def _presence(seat: list[FaceObservation]) -> int:
+    return len(_times(seat))
+
+
+def _facecam_cluster(
+    seats: list[list[FaceObservation]], sampled_frames: int
+) -> list[list[FaceObservation]]:
+    """The seats that make up the facecam: an anchor and the seats beside it.
+
+    People in a facecam swap places, lean in and out, and join for part of a
+    video, so only one of them may hold a spot for long. The anchor is the most
+    present seat (at least :data:`STABLE_MIN_PRESENCE`); seats with at least
+    :data:`SUPPORT_MIN_PRESENCE` join when they sit at the same height with a
+    similar face size, within :data:`SUPPORT_MAX_GAP` face widths of a seat
+    already in the cluster, and on screen together with it often enough
+    (:data:`MIN_TOGETHER`): a facecam is several people at once, not one
+    person who sits in different places.
+    """
+
+    def centre(seat: list[FaceObservation]) -> tuple[float, float, float, float]:
+        return (
+            statistics.median(o.cx for o in seat),
+            statistics.median(o.cy for o in seat),
+            statistics.median(o.width for o in seat),
+            statistics.median(o.height for o in seat),
+        )
+
+    ranked = sorted(seats, key=_presence, reverse=True)
+    if not ranked or _presence(ranked[0]) < STABLE_MIN_PRESENCE * sampled_frames:
+        return []
+
+    cluster = [ranked[0]]
+    candidates = [s for s in ranked[1:] if _presence(s) >= SUPPORT_MIN_PRESENCE * sampled_frames]
+    grew = True
+    while grew:
+        grew = False
+        for seat in list(candidates):
+            cx, cy, w, h = centre(seat)
+            for member in cluster:
+                mx, my, mw, mh = centre(member)
+                together = len(_times(seat) & _times(member))
+                if (
+                    abs(cy - my) <= 0.5 * mh
+                    and 0.7 <= h / mh <= 1.4
+                    and abs(cx - mx) <= SUPPORT_MAX_GAP * mw
+                    and together >= max(3, MIN_TOGETHER * sampled_frames)
+                ):
+                    cluster.append(seat)
+                    candidates.remove(seat)
+                    grew = True
+                    break
+    return cluster
+
+
+def _is_steady(track: FaceTrack, source_w: int, source_h: int) -> bool:
+    """A track that could be a webcam face: not huge, and barely moving."""
     observations = track.observations
     if len(observations) < 3:
-        return False
-    if len({round(o.t, 3) for o in observations}) < STABLE_MIN_PRESENCE * face_frames:
         return False
     if statistics.median(o.height for o in observations) > FACECAM_MAX_FACE_HEIGHT * source_h:
         return False
@@ -225,6 +300,35 @@ def _is_stable(track: FaceTrack, face_frames: int, source_w: int, source_h: int)
         statistics.pstdev(o.cx for o in observations) <= STABLE_MAX_DRIFT * source_w
         and statistics.pstdev(o.cy for o in observations) <= STABLE_MAX_DRIFT * source_h
     )
+
+
+def _seats(tracks: Iterable[FaceTrack]) -> list[list[FaceObservation]]:
+    """Merge steady tracks at the same spot into one observation list per person.
+
+    Same spot means centres within :data:`SEAT_TOLERANCE` of a face size of the
+    seat's centre and a similar face size. Longest tracks go first, so a seat's
+    centre comes from the best-observed stretch.
+    """
+    seats: list[list[FaceObservation]] = []
+    centres: list[tuple[float, float, float, float]] = []  # cx, cy, width, height
+    for track in sorted(tracks, key=lambda t: len(t.observations), reverse=True):
+        obs = track.observations
+        cx = statistics.median(o.cx for o in obs)
+        cy = statistics.median(o.cy for o in obs)
+        w = statistics.median(o.width for o in obs)
+        h = statistics.median(o.height for o in obs)
+        for index, (sx, sy, sw, sh) in enumerate(centres):
+            if (
+                abs(cx - sx) <= SEAT_TOLERANCE * sw
+                and abs(cy - sy) <= SEAT_TOLERANCE * sh
+                and 0.7 <= h / sh <= 1.4
+            ):
+                seats[index].extend(obs)
+                break
+        else:
+            seats.append(list(obs))
+            centres.append((cx, cy, w, h))
+    return seats
 
 
 def faces_in(region: Rect, faces: Sequence[FaceObservation]) -> bool:
@@ -254,4 +358,6 @@ def fit_aspect(region: Rect, aspect: float, *, bounds_w: float, bounds_h: float)
     cy = region.y + region.height / 2
     x = min(max(0.0, cx - width / 2), bounds_w - width)
     y = min(max(0.0, cy - height / 2), bounds_h - height)
-    return Rect(round(x), round(y), round(width) - round(width) % 2, round(height) - round(height) % 2)
+    return Rect(
+        round(x), round(y), round(width) - round(width) % 2, round(height) - round(height) % 2
+    )
