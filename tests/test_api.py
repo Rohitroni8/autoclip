@@ -370,6 +370,7 @@ class TestProviderStatus:
             "openai",
             "gemini",
             "ollama",
+            "external",
         }
 
     def test_missing_key_is_reported_as_unavailable(self, client: TestClient, fake_keyring) -> None:

@@ -3,6 +3,9 @@
 Four adapters behind one interface. ``openai`` is the widest of them: because
 its base URL is configurable, it also serves OpenRouter, Groq, DeepSeek,
 Together, and any local OpenAI-compatible server.
+
+``external`` is not a model adapter: it reads a selection written by a judge
+outside AutoClip (see ``external_provider.py``).
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from .base import (
     ProviderStatus,
     TranscriptWindow,
 )
+from .external_provider import ExternalProvider
 from .gemini_provider import GeminiProvider
 from .ollama_provider import OllamaProvider
 from .openai_provider import OpenAIProvider
@@ -28,6 +32,7 @@ __all__ = [
     "ClipCandidate",
     "ClipCandidates",
     "DetectionConfig",
+    "ExternalProvider",
     "GeminiProvider",
     "LLMProvider",
     "OllamaProvider",
@@ -45,6 +50,7 @@ PROVIDERS: dict[str, type[LLMProvider]] = {
     "openai": OpenAIProvider,
     "gemini": GeminiProvider,
     "ollama": OllamaProvider,
+    "external": ExternalProvider,
 }
 
 

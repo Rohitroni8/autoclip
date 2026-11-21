@@ -16,7 +16,13 @@ import logging
 from collections.abc import Callable
 
 from ..db.models import Clip, new_id
-from ..providers import ClipCandidate, DetectionConfig, LLMProvider, TranscriptWindow
+from ..providers import (
+    ClipCandidate,
+    DetectionConfig,
+    ExternalProvider,
+    LLMProvider,
+    TranscriptWindow,
+)
 from . import boundaries
 from .prepare import Silence
 from .transcript import Transcript
@@ -129,6 +135,15 @@ async def detect(
     on_progress: Callable[[float], None] | None = None,
 ) -> list[Clip]:
     """Run detection across the whole transcript and return ranked clips."""
+    if isinstance(provider, ExternalProvider):
+        # The external judge reads the whole transcript, so there are no
+        # windows to score. An empty selection is a valid answer ("nothing in
+        # this video is worth clipping"), not an error.
+        candidates = provider.select(transcript, job_id=job_id)
+        if on_progress:
+            on_progress(1.0)
+        return build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [])
+
     windows = build_windows(transcript)
     if not windows:
         raise HighlightError("The transcript is empty, so there is nothing to clip.")
