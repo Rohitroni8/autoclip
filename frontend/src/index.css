@@ -44,6 +44,9 @@
   --color-ink-800: oklch(0.208 0.013 55);
   --color-ink-700: oklch(0.262 0.014 55);
   --color-ink-600: oklch(0.335 0.014 55);
+  /* Used across the UI for muted text and the score bars; without it Tailwind
+     emits no class and the element falls back to an inherited colour. */
+  --color-ink-500: oklch(0.440 0.0135 56);
   --color-ink-400: oklch(0.545 0.013 58);
   --color-ink-300: oklch(0.678 0.012 60);
   --color-ink-200: oklch(0.812 0.010 62);
