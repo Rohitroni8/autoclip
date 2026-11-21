@@ -416,6 +416,11 @@ def clip(
     centre_crop: bool = typer.Option(
         False, "--centre-crop", help="Skip face tracking and centre-crop everything."
     ),
+    auto_export: bool = typer.Option(
+        False,
+        "--auto-export",
+        help="Render every clip immediately instead of waiting for review.",
+    ),
 ) -> None:
     """Turn a video into captioned vertical clips."""
     import asyncio
@@ -442,6 +447,8 @@ def clip(
         settings.whisper.diarization = True
     if centre_crop:
         settings.export.__dict__["centre_crop"] = True
+    if auto_export:
+        settings.export.auto_export = True
 
     # --- ingest ---------------------------------------------------------
     try:
@@ -508,7 +515,13 @@ def clip(
 
     console.print()
     console.print(table)
-    console.print(f"\n[green]Exported to[/green] {paths.exports_dir() / job.id}")
+    if settings.export.auto_export:
+        console.print(f"\n[green]Exported to[/green] {paths.exports_dir() / job.id}")
+    else:
+        console.print(
+            "\n[green]Ready for review.[/green] Run `autoclip serve` and open "
+            f"http://127.0.0.1:8000/jobs/{job.id}/clips to approve and export."
+        )
 
 
 @app.command()

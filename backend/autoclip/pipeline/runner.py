@@ -70,6 +70,20 @@ class ProgressEvent:
 ProgressHandler = Callable[[ProgressEvent], None]
 
 
+def job_settings(job: Job) -> Settings:
+    """The settings a job was created with, falling back to the saved config.
+
+    ``POST /api/jobs`` stores a snapshot with the per-job overrides (language,
+    Whisper model, clip limits, caption style) applied. Running from that
+    snapshot is what makes those overrides take effect, and keeps a queued job
+    from changing behaviour if the global config is edited while it waits.
+    Jobs created without a snapshot (older rows, the CLI) use the saved config.
+    """
+    if job.settings:
+        return Settings.model_validate(job.settings)
+    return load_settings()
+
+
 class JobWorkspace:
     """Paths for one job's intermediate artifacts."""
 
@@ -115,7 +129,7 @@ class PipelineRunner:
     ) -> None:
         self.job = job
         self.source = source
-        self.settings = settings or load_settings()
+        self.settings = settings or job_settings(job)
         self.on_progress = on_progress
         self._is_cancelled = is_cancelled or (lambda: False)
         self.workspace = JobWorkspace(job.id)
@@ -169,7 +183,11 @@ class PipelineRunner:
     # -- entry point -------------------------------------------------------
 
     async def run(self) -> list[Clip]:
-        """Run the full pipeline and return the exported clips."""
+        """Run the pipeline and return the detected clips.
+
+        Clips are rendered here only when ``export.auto_export`` is on;
+        otherwise they wait for review.
+        """
         store.update_job(self.job.id, status="running", started_at=utcnow(), error=None)
 
         try:
@@ -179,7 +197,12 @@ class PipelineRunner:
             clips = await self._stage_highlights(transcript, silences)
             crop_paths = self._stage_reframe(clips, transcript)
             self._stage_captions(clips, transcript)
-            self._stage_export(clips, transcript, crop_paths)
+            if self.settings.export.auto_export:
+                self._stage_export(clips, transcript, crop_paths)
+            else:
+                # Review gate: nothing is rendered until a clip is approved and
+                # exported explicitly, so the job ends ready for review.
+                self._emit(Stage.CAPTIONS, 1.0, "Ready for review", overall=1.0)
         except JobCancelled:
             store.update_job(self.job.id, status="cancelled", finished_at=utcnow(), progress=0.0)
             raise
