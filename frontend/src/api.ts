@@ -65,6 +65,12 @@ export interface Clip {
   reason: string
   status: ClipStatus
   user_trimmed: boolean
+  // Per-dimension scores, 0-10; null for clips detected without them.
+  score_hook: number | null
+  score_story: number | null
+  score_engagement: number | null
+  score_standalone: number | null
+  hook_headline: string
   caption_style: string
   ratio: string
   exports: ExportRecord[]
