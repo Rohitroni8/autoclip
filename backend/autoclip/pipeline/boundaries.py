@@ -65,11 +65,18 @@ def refine(
     silences: list[Silence] | None = None,
     min_duration_s: float = 20.0,
     max_duration_s: float = 90.0,
+    snap: bool = True,
 ) -> Boundary | None:
     """Refine a proposed word range into a cuttable boundary.
 
     Returns None when the range cannot be made to satisfy the duration
     constraints — a candidate that would need to be butchered is better dropped.
+
+    ``snap=False`` keeps the proposed words exactly: no sentence snapping and
+    no stretching or trimming to fit the duration range, so a range outside it
+    is dropped. That is for a judge that has already placed its edges on whole
+    thoughts; snapping to Whisper's punctuation would undo that wherever a
+    full stop is missing.
 
     Preconditions:
         transcript has word-level timings; start_word and end_word are valid
@@ -82,15 +89,22 @@ def refine(
     start_word = max(0, min(start_word, last_index))
     end_word = max(start_word, min(end_word, last_index))
 
-    start_word = snap_start_to_sentence(transcript, start_word)
-    end_word = snap_end_to_sentence(transcript, end_word)
+    if snap:
+        start_word = snap_start_to_sentence(transcript, start_word)
+        end_word = snap_end_to_sentence(transcript, end_word)
 
     if end_word <= start_word:
         return None
 
-    end_word = _clamp_duration(transcript, start_word, end_word, min_duration_s, max_duration_s)
-    if end_word is None:
-        return None
+    if snap:
+        clamped = _clamp_duration(transcript, start_word, end_word, min_duration_s, max_duration_s)
+        if clamped is None:
+            return None
+        end_word = clamped
+    else:
+        start_s, end_s = transcript.time_range(start_word, end_word)
+        if not min_duration_s <= end_s - start_s <= max_duration_s:
+            return None
 
     start_s, end_s = transcript.time_range(start_word, end_word)
     start_s = align_start(start_s, silences or [])

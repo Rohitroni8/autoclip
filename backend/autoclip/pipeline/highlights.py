@@ -142,7 +142,10 @@ async def detect(
         candidates = provider.select(transcript, job_id=job_id)
         if on_progress:
             on_progress(1.0)
-        return build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [])
+        # The judge's edges are kept as chosen; see boundaries.refine(snap=False).
+        return build_clips(
+            transcript, candidates, config, job_id=job_id, silences=silences or [], snap=False
+        )
 
     windows = build_windows(transcript)
     if not windows:
@@ -197,8 +200,13 @@ def build_clips(
     *,
     job_id: str,
     silences: list[Silence] | None = None,
+    snap: bool = True,
 ) -> list[Clip]:
-    """Deduplicate, refine, rank, and truncate raw candidates into clips."""
+    """Deduplicate, refine, rank, and truncate raw candidates into clips.
+
+    ``snap=False`` keeps each candidate's word range exactly and drops any
+    whose length is outside the configured range, with a warning.
+    """
     deduped = dedupe(candidates)
     log.info("%d candidates remain after dedupe.", len(deduped))
 
@@ -211,12 +219,18 @@ def build_clips(
             silences=silences or [],
             min_duration_s=config.min_duration_s,
             max_duration_s=config.max_duration_s,
+            snap=snap,
         )
         if boundary is None:
-            log.debug(
-                "Dropped candidate %d-%d: no valid boundary within the duration range.",
+            # A model's rough range is routinely unusable; a judge's chosen
+            # range being dropped is worth seeing.
+            log.log(
+                logging.DEBUG if snap else logging.WARNING,
+                "Dropped candidate %d-%d: no valid boundary within the %.0f-%.0f s range.",
                 candidate.start_word_index,
                 candidate.end_word_index,
+                config.min_duration_s,
+                config.max_duration_s,
             )
             continue
 
