@@ -169,7 +169,11 @@ class PipelineRunner:
     # -- entry point -------------------------------------------------------
 
     async def run(self) -> list[Clip]:
-        """Run the full pipeline and return the exported clips."""
+        """Run the pipeline and return the detected clips.
+
+        Clips are rendered here only when ``export.auto_export`` is on;
+        otherwise they wait for review.
+        """
         store.update_job(self.job.id, status="running", started_at=utcnow(), error=None)
 
         try:
@@ -179,7 +183,12 @@ class PipelineRunner:
             clips = await self._stage_highlights(transcript, silences)
             crop_paths = self._stage_reframe(clips, transcript)
             self._stage_captions(clips, transcript)
-            self._stage_export(clips, transcript, crop_paths)
+            if self.settings.export.auto_export:
+                self._stage_export(clips, transcript, crop_paths)
+            else:
+                # Review gate: nothing is rendered until a clip is approved and
+                # exported explicitly, so the job ends ready for review.
+                self._emit(Stage.CAPTIONS, 1.0, "Ready for review", overall=1.0)
         except JobCancelled:
             store.update_job(self.job.id, status="cancelled", finished_at=utcnow(), progress=0.0)
             raise

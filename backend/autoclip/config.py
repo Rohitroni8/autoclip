@@ -92,6 +92,10 @@ class ExportSettings(BaseModel):
     crf: int = 18
     #: Also write a .srt sidecar next to each exported clip.
     write_srt: bool = False
+    #: Render every detected clip as soon as the pipeline finishes. Off by
+    #: default: clips wait for review, and only an explicit export (the review
+    #: UI or POST /api/clips/{id}/export) renders a file.
+    auto_export: bool = False
 
 
 class Settings(BaseModel):
