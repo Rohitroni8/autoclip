@@ -14,10 +14,12 @@ from pathlib import Path
 import pytest
 from autoclip.config import ExportSettings
 from autoclip.pipeline import captions, export, ffmpeg
+from autoclip.pipeline.reframe import layout
 from autoclip.pipeline.reframe.croppath import (
     CropKeyframe,
     CropPath,
     CropSegment,
+    Rect,
     Strategy,
     centre_crop,
 )
@@ -414,3 +416,168 @@ def _frame_signature(video: Path, timestamp: float) -> str:
         check=True,
     )
     return result.stdout.strip()
+
+
+# --------------------------------------------------------------------------
+# Stacked layout and windowed fit
+# --------------------------------------------------------------------------
+
+#: A frame of solid regions: a red "facecam" top right, green "gameplay" in the
+#: middle, a yellow "subtitle" strip at the bottom, blue everywhere else.
+FACECAM_BOX = (960, 40, 280, 160)
+GAMEPLAY_BOX = (380, 60, 520, 560)
+SUBTITLE_TOP = 640
+
+
+@pytest.fixture(scope="module")
+def regions_video(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("media") / "regions.mp4"
+    boxes = [
+        (*FACECAM_BOX, "red"),
+        (*GAMEPLAY_BOX, "lime"),
+        (0, SUBTITLE_TOP, SOURCE_W, SOURCE_H - SUBTITLE_TOP, "yellow"),
+    ]
+    draw = ",".join(f"drawbox=x={x}:y={y}:w={w}:h={h}:color={c}:t=fill" for x, y, w, h, c in boxes)
+    subprocess.run(
+        [
+            ffmpeg.ffmpeg_path(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=blue:size={SOURCE_W}x{SOURCE_H}:rate=30:duration={SOURCE_DURATION},{draw}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={SOURCE_DURATION}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def _frame_rgb(video: Path, timestamp: float):
+    """One decoded frame as an (H, W, 3) uint8 array."""
+    import numpy as np
+
+    info = ffmpeg.probe(video)
+    result = subprocess.run(
+        [
+            ffmpeg.ffmpeg_path(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            str(timestamp),
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return np.frombuffer(result.stdout, np.uint8).reshape(info.height, info.width, 3)
+
+
+def _dominant(pixels) -> str:
+    """Name the colour most of ``pixels`` are closest to."""
+    import numpy as np
+
+    palette = {
+        "red": (255, 0, 0),
+        "lime": (0, 255, 0),
+        "yellow": (255, 255, 0),
+        "blue": (0, 0, 255),
+    }
+    flat = pixels.reshape(-1, 3).astype(int)
+    names = list(palette)
+    distances = np.stack([((flat - palette[n]) ** 2).sum(axis=1) for n in names])
+    counts = np.bincount(distances.argmin(axis=0), minlength=len(names))
+    return names[int(counts.argmax())]
+
+
+def _red_pixels(pixels) -> int:
+    return int(((pixels[..., 0] > 200) & (pixels[..., 1] < 60) & (pixels[..., 2] < 60)).sum())
+
+
+class TestStackedRender:
+    def _render(self, video: Path, segments, tmp_path, name: str) -> Path:
+        crop_path = CropPath(source_width=SOURCE_W, source_height=SOURCE_H, segments=segments)
+        destination = tmp_path / f"{name}.mp4"
+        export.export_clip(
+            make_request(video, destination, crop_path, [], burn_captions=False),
+            work_dir=tmp_path / "work",
+        )
+        return destination
+
+    def test_facecam_on_top_gameplay_below(self, regions_video, tmp_path) -> None:
+        stacked = layout.stacked_segment(
+            0.0,
+            5.0,
+            facecam=Rect(*FACECAM_BOX),
+            usable_h=SUBTITLE_TOP,
+            source_w=SOURCE_W,
+            aspect=9 / 16,
+        )
+        destination = self._render(regions_video, [stacked], tmp_path, "stacked")
+
+        info = ffmpeg.probe(destination)
+        assert (info.width, info.height) == (1080, 1920)
+        frame = _frame_rgb(destination, 1.0)
+        top_h = 1920 * layout.STACK_SPLIT
+        assert _dominant(frame[: int(top_h)]) == "red"
+        assert _dominant(frame[int(top_h) :]) == "lime"
+        # The source's subtitles never reach the output.
+        assert _dominant(frame[-40:]) != "yellow"
+
+    def test_full_width_opening_then_enlarged_gameplay(self, regions_video, tmp_path) -> None:
+        kwargs = {
+            "facecam": Rect(*FACECAM_BOX),
+            "usable_h": SUBTITLE_TOP,
+            "source_w": SOURCE_W,
+            "aspect": 9 / 16,
+        }
+        opening = layout.stacked_segment(0.0, 2.0, full_width=True, **kwargs)
+        rest = layout.stacked_segment(2.0, 5.0, **kwargs)
+        destination = self._render(regions_video, [opening, rest], tmp_path, "stacked_opening")
+
+        top = int(1920 * layout.STACK_SPLIT)
+        # Full width: the whole frame, facecam corner included, shows below.
+        # Enlarged: the gameplay alone, beside the facecam.
+        assert _red_pixels(_frame_rgb(destination, 1.0)[top:]) > 5000
+        assert _red_pixels(_frame_rgb(destination, 4.0)[top:]) == 0
+        assert _dominant(_frame_rgb(destination, 4.0)[top:]) == "lime"
+
+    def test_fit_window_leaves_out_the_subtitles(self, regions_video, tmp_path) -> None:
+        fit = CropSegment(
+            start_s=0.0,
+            end_s=5.0,
+            width=SOURCE_W,
+            height=SUBTITLE_TOP,
+            keyframes=[CropKeyframe(0.0, 0.0, 0.0)],
+            strategy=Strategy.WIDE,
+            fit=True,
+        )
+        destination = self._render(regions_video, [fit], tmp_path, "fit_window")
+        frame = _frame_rgb(destination, 1.0)
+        # The sharp middle band is the fitted window; no yellow in it.
+        middle = frame[960 - 200 : 960 + 200]
+        assert not ((middle[..., 0] > 200) & (middle[..., 1] > 200) & (middle[..., 2] < 80)).any()

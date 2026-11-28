@@ -19,7 +19,7 @@ from ..system import report
 from . import captions as captions_module
 from . import ffmpeg
 from .captions import CaptionStyle
-from .reframe.croppath import CropPath, segment_crop_filter
+from .reframe.croppath import CropPath, CropSegment, Rect, Strategy, segment_crop_filter
 from .transcript import Word
 
 log = logging.getLogger(__name__)
@@ -115,8 +115,12 @@ def build_video_filtergraph(
             )
             parts.append(prefix)
 
+        if segment.strategy is Strategy.STACKED and segment.stack_top is not None:
+            parts.extend(_stacked_chain(source_label, index, segment, out_w, out_h))
+            continue
+
         if segment.fit:
-            parts.extend(_fit_chain(source_label, index, out_w, out_h))
+            parts.extend(_fit_chain(source_label, index, segment.window, out_w, out_h))
             continue
 
         chain = [segment_crop_filter(segment)]
@@ -143,15 +147,19 @@ def build_video_filtergraph(
     return ";".join(parts)
 
 
-def _fit_chain(source_label: str, index: int, out_w: int, out_h: int) -> list[str]:
-    """Fit the whole frame into the output over a blurred copy of itself.
+def _fit_chain(
+    source_label: str, index: int, window: Rect, out_w: int, out_h: int, *, out_label: str = ""
+) -> list[str]:
+    """Fit ``window`` of the frame into the output over a blurred copy of itself.
 
     Used when the subjects are spread wider than any crop can hold. Plain black
     bars would be honest but look cheap on a phone; a blurred fill is what
-    viewers are used to seeing and keeps the frame full-bleed.
+    viewers are used to seeing and keeps the frame full-bleed. The window is
+    usually the whole frame, or the part above the source's own subtitles.
     """
+    out_label = out_label or f"v{index}"
     return [
-        f"{source_label}split=2[fitbg{index}][fitfg{index}]",
+        f"{source_label}{_window_crop(window)}split=2[fitbg{index}][fitfg{index}]",
         (
             f"[fitbg{index}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
             f"crop={out_w}:{out_h},boxblur=24:2[bg{index}]"
@@ -160,8 +168,46 @@ def _fit_chain(source_label: str, index: int, out_w: int, out_h: int) -> list[st
             f"[fitfg{index}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:"
             f"flags=lanczos[fg{index}]"
         ),
-        (f"[bg{index}][fg{index}]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[v{index}]"),
+        (f"[bg{index}][fg{index}]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[{out_label}]"),
     ]
+
+
+def _window_crop(window: Rect) -> str:
+    """A static ``crop`` for a source region, followed by a comma."""
+    return f"crop=w={int(window.width)}:h={int(window.height)}:x={int(window.x)}:y={int(window.y)},"
+
+
+def _stacked_chain(
+    source_label: str, index: int, segment: CropSegment, out_w: int, out_h: int
+) -> list[str]:
+    """The facecam in a band on top, the gameplay window filling the band below."""
+    assert segment.stack_top is not None
+    top_h = round(out_h * segment.stack_split)
+    top_h -= top_h % 2
+    bottom_h = out_h - top_h
+    window = segment.window
+
+    parts = [
+        f"{source_label}split=2[stt{index}][stb{index}]",
+        (
+            f"[stt{index}]{_window_crop(segment.stack_top)}"
+            f"scale={out_w}:{top_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={out_w}:{top_h},setsar=1,format=yuv420p[top{index}]"
+        ),
+    ]
+    # A gameplay window already at the band's shape just scales; the opening's
+    # full-width window is fitted over a blur.
+    if abs(window.width / window.height - out_w / bottom_h) < 0.01:
+        parts.append(
+            f"[stb{index}]{_window_crop(window)}scale={out_w}:{bottom_h}:flags=lanczos,"
+            f"setsar=1,format=yuv420p[bot{index}]"
+        )
+    else:
+        parts.extend(
+            _fit_chain(f"[stb{index}]", index, window, out_w, bottom_h, out_label=f"bot{index}")
+        )
+    parts.append(f"[top{index}][bot{index}]vstack=inputs=2[v{index}]")
+    return parts
 
 
 def _zoom_filter(zoom: float, out_w: int, out_h: int) -> str:

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { formatTimecode, type CaptionStyle, type CropPath, type Word } from '../api'
+import {
+  formatTimecode,
+  type CaptionStyle,
+  type CropPath,
+  type CropRect,
+  type CropSegment,
+  type Word,
+} from '../api'
 
 const VOLUME_KEY = 'autoclip.volume'
 
@@ -13,6 +20,9 @@ const ASPECTS: Record<string, [number, number]> = {
 
 /** Tallest the preview may be, so the transport row stays on screen. */
 const MAX_HEIGHT_VH = 62
+
+/** Width of the composited preview canvas; its height follows the ratio. */
+const CANVAS_WIDTH = 540
 
 function readStoredVolume(): number {
   const stored = Number(window.localStorage.getItem(VOLUME_KEY))
@@ -45,6 +55,7 @@ export function ClipPlayer({
   cropPath?: CropPath | null
 }) {
   const video = useRef<HTMLVideoElement>(null)
+  const canvas = useRef<HTMLCanvasElement>(null)
   const [playing, setPlaying] = useState(false)
   const [time, setTime] = useState(startS)
   const [volume, setVolume] = useState(readStoredVolume)
@@ -121,7 +132,29 @@ export function ClipPlayer({
   const duration = Math.max(0.01, endS - startS)
 
   const cropStyle = cropWindowStyle(cropPath, elapsed)
+  const composite = needsComposite(activeSegment(cropPath, elapsed))
   const [aspectW, aspectH] = ASPECTS[ratio] ?? ASPECTS['9:16']
+
+  // Fitted and stacked segments are drawn onto a canvas the way the renderer
+  // composes them; the video element stays underneath, invisible, as the
+  // source of frames and sound.
+  useEffect(() => {
+    if (!composite) return
+    let handle = 0
+    let drawn = -1
+    const draw = () => {
+      const element = video.current
+      const target = canvas.current
+      if (element && target && element.readyState >= 2 && element.currentTime !== drawn) {
+        const segment = activeSegment(cropPath, Math.max(0, element.currentTime - startS))
+        if (segment) drawComposite(target, element, segment)
+        drawn = element.currentTime
+      }
+      handle = requestAnimationFrame(draw)
+    }
+    handle = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(handle)
+  }, [composite, cropPath, startS])
   // Height alone can't bound the box: with width:100% and an aspect-ratio, a
   // max-height clamp shortens the element without narrowing it, so the rendered
   // shape stops matching the ratio — a 9:16 preview ends up looking square.
@@ -147,13 +180,28 @@ export function ClipPlayer({
         <video
           ref={video}
           src={src}
-          className={cropStyle ? 'absolute max-w-none' : 'size-full object-cover'}
-          style={cropStyle ?? undefined}
+          className={
+            composite
+              ? 'absolute inset-0 size-full opacity-0'
+              : cropStyle
+                ? 'absolute max-w-none'
+                : 'size-full object-cover'
+          }
+          style={!composite && cropStyle ? cropStyle : undefined}
           onTimeUpdate={onTimeUpdate}
           preload="auto"
           playsInline
           controls={nativeControls}
         />
+
+        {composite && (
+          <canvas
+            ref={canvas}
+            width={CANVAS_WIDTH}
+            height={Math.round((CANVAS_WIDTH * aspectH) / aspectW)}
+            className="absolute inset-0 size-full"
+          />
+        )}
 
         <CaptionOverlay words={words} time={time} style={style} />
 
@@ -319,15 +367,9 @@ function cropWindowStyle(
   cropPath: CropPath | null | undefined,
   elapsed: number,
 ): React.CSSProperties | null {
-  if (!cropPath || cropPath.segments.length === 0) return null
-
-  const segment =
-    cropPath.segments.find((s) => elapsed >= s.start_s && elapsed < s.end_s) ??
-    cropPath.segments[cropPath.segments.length - 1]
-
-  // A fitted segment shows the whole frame over a blur rather than cropping.
-  // Letting it fall through to object-contain is closer than any crop would be.
-  if (segment.fit) return null
+  const segment = activeSegment(cropPath, elapsed)
+  // Fitted and stacked segments are drawn on the canvas instead.
+  if (!cropPath || !segment || needsComposite(segment)) return null
 
   const { x, y } = interpolate(segment.keyframes, elapsed)
   const { source_width: sourceW, source_height: sourceH } = cropPath
@@ -338,6 +380,93 @@ function cropWindowStyle(
     left: `${(-x / segment.width) * 100}%`,
     top: `${(-y / segment.height) * 100}%`,
   }
+}
+
+function activeSegment(
+  cropPath: CropPath | null | undefined,
+  elapsed: number,
+): CropSegment | null {
+  if (!cropPath || cropPath.segments.length === 0) return null
+  return (
+    cropPath.segments.find((s) => elapsed >= s.start_s && elapsed < s.end_s) ??
+    cropPath.segments[cropPath.segments.length - 1]
+  )
+}
+
+function needsComposite(segment: CropSegment | null): boolean {
+  return !!segment && (segment.fit || (segment.strategy === 'stacked' && !!segment.stack_top))
+}
+
+/**
+ * Draw one frame the way export.py composes it: a fitted window over a blur of
+ * itself, or the facecam band stacked above the gameplay window.
+ */
+function drawComposite(target: HTMLCanvasElement, source: HTMLVideoElement, segment: CropSegment) {
+  const context = target.getContext('2d')
+  if (!context) return
+  const { width, height } = target
+  const first = segment.keyframes[0] ?? { x: 0, y: 0 }
+  const area: CropRect = { x: first.x, y: first.y, width: segment.width, height: segment.height }
+
+  if (segment.strategy === 'stacked' && segment.stack_top) {
+    const topH = Math.round(height * (segment.stack_split ?? 0.35))
+    drawCover(context, source, segment.stack_top, 0, 0, width, topH)
+    drawFitted(context, source, area, 0, topH, width, height - topH)
+  } else {
+    drawFitted(context, source, area, 0, 0, width, height)
+  }
+}
+
+/** Fill the box with the region, cropping the region's centre to the box's shape. */
+function drawCover(
+  context: CanvasRenderingContext2D,
+  source: HTMLVideoElement,
+  region: CropRect,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+) {
+  const scale = Math.max(dw / region.width, dh / region.height)
+  const sw = dw / scale
+  const sh = dh / scale
+  const sx = region.x + (region.width - sw) / 2
+  const sy = region.y + (region.height - sh) / 2
+  context.drawImage(source, sx, sy, sw, sh, dx, dy, dw, dh)
+}
+
+/** The whole region inside the box, over a blurred fill of itself. */
+function drawFitted(
+  context: CanvasRenderingContext2D,
+  source: HTMLVideoElement,
+  region: CropRect,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+) {
+  context.save()
+  context.beginPath()
+  context.rect(dx, dy, dw, dh)
+  context.clip()
+  context.filter = 'blur(12px)'
+  drawCover(context, source, region, dx, dy, dw, dh)
+  context.filter = 'none'
+  const scale = Math.min(dw / region.width, dh / region.height)
+  const fw = region.width * scale
+  const fh = region.height * scale
+  context.drawImage(
+    source,
+    region.x,
+    region.y,
+    region.width,
+    region.height,
+    dx + (dw - fw) / 2,
+    dy + (dh - fh) / 2,
+    fw,
+    fh,
+  )
+  context.restore()
 }
 
 /** Piecewise-linear lookup, matching croppath.axis_expression on the server. */

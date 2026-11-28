@@ -89,9 +89,21 @@ export interface CropSegment {
   width: number
   height: number
   keyframes: CropKeyframe[]
-  strategy: 'track' | 'wide' | 'general'
+  strategy: 'track' | 'wide' | 'general' | 'stacked'
   zoom: number
   fit: boolean
+  /** STACKED only: the facecam region shown in the top band. */
+  stack_top?: CropRect | null
+  /** STACKED only: fraction of the output height given to the top band. */
+  stack_split?: number
+}
+
+/** Mirrors autoclip.pipeline.reframe.croppath.Rect, in source pixels. */
+export interface CropRect {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 /** Mirrors autoclip.pipeline.reframe.croppath.CropPath. */

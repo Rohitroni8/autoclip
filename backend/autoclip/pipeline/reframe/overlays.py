@@ -16,6 +16,7 @@ they can be tested without video.
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -161,7 +162,7 @@ FACECAM_MAX_FACE_HEIGHT = 0.33
 #: from the clip. Measured against the whole clip, not against the frames that
 #: happen to contain faces: a game character's two-second close-up must not
 #: count as a fixture just because the facecam itself is hard to detect.
-STABLE_MIN_PRESENCE = 0.25
+STABLE_MIN_PRESENCE = 0.20
 #: ...and its centre wanders by at most this fraction of the frame (standard
 #: deviation). Game characters and people moving through a shot fail this.
 STABLE_MAX_DRIFT = 0.04
@@ -354,10 +355,21 @@ def fit_aspect(region: Rect, aspect: float, *, bounds_w: float, bounds_h: float)
     if height > bounds_h:
         width, height = bounds_h * aspect, bounds_h
 
+    # Even sizes for the encoder, rounded up so the region stays inside.
+    width = min(_even_up(width), _even_down(bounds_w))
+    height = min(_even_up(height), _even_down(bounds_h))
     cx = region.x + region.width / 2
     cy = region.y + region.height / 2
     x = min(max(0.0, cx - width / 2), bounds_w - width)
     y = min(max(0.0, cy - height / 2), bounds_h - height)
-    return Rect(
-        round(x), round(y), round(width) - round(width) % 2, round(height) - round(height) % 2
-    )
+    return Rect(math.floor(x), math.floor(y), width, height)
+
+
+def _even_up(value: float) -> int:
+    rounded = math.ceil(value - 1e-6)
+    return rounded + rounded % 2
+
+
+def _even_down(value: float) -> int:
+    rounded = math.floor(value + 1e-6)
+    return rounded - rounded % 2

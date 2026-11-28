@@ -8,6 +8,9 @@ Pipeline for one clip:
 4. Map diarized speakers onto tracks once, then let turn boundaries drive framing.
 5. Per shot, pick a strategy — TRACK, WIDE, or GENERAL.
 6. Build a raw crop path, smooth it, and emit segments.
+7. Apply the layout rules (:mod:`.layout`): stack a facecam over gameplay,
+   keep crops above the source's own subtitles, show the full width in the
+   opening seconds.
 
 The quality bar is "never jarring": no visible jitter, no cut-off faces, the
 speaker on screen for essentially all of their speaking time. Every default here
@@ -27,11 +30,14 @@ from .croppath import (
     CropKeyframe,
     CropPath,
     CropSegment,
+    Rect,
     Strategy,
     centre_crop,
     target_crop_size,
 )
 from .faces import FaceDetectionUnavailable, FaceObservation, sample_faces
+from .layout import apply_layout
+from .overlays import detect_facecam, detect_subtitle_band, sample_frames
 from .scenes import Shot, detect_shots
 from .smoothing import SmoothingConfig, smooth_series
 from .speaker import assign_speakers, map_tracks_to_speakers
@@ -112,24 +118,37 @@ def build_crop_path(
         )
     except FaceDetectionUnavailable as exc:
         log.warning("Face detection unavailable (%s); using a centre crop.", exc)
-        return centre_crop(
-            source_w,
-            source_h,
-            duration,
-            aspect_w=config.aspect_w,
-            aspect_h=config.aspect_h,
-            zoom=GENERAL_ZOOM,
+        observations = []
+
+    usable_h = _usable_height(video, start_s=start_s, end_s=end_s, source_h=source_h)
+
+    def finish(
+        segments: list[CropSegment], tracks: list[FaceTrack], facecam: Rect | None
+    ) -> CropPath:
+        laid_out = apply_layout(
+            segments,
+            tracks=tracks,
+            facecam=facecam,
+            usable_h=usable_h,
+            source_w=source_w,
+            source_h=source_h,
+            aspect=config.aspect_w / config.aspect_h,
         )
+        return CropPath(source_width=source_w, source_height=source_h, segments=laid_out)
 
     if not observations:
         log.info("No faces detected in %s; using a centre crop.", video.name)
-        return centre_crop(
-            source_w,
-            source_h,
-            duration,
-            aspect_w=config.aspect_w,
-            aspect_h=config.aspect_h,
-            zoom=GENERAL_ZOOM,
+        return finish(
+            centre_crop(
+                source_w,
+                source_h,
+                duration,
+                aspect_w=config.aspect_w,
+                aspect_h=config.aspect_h,
+                zoom=GENERAL_ZOOM,
+            ).segments,
+            [],
+            None,
         )
 
     tracks = build_tracks(observations)
@@ -155,8 +174,12 @@ def build_crop_path(
         )
 
     if not segments:
-        return centre_crop(
-            source_w, source_h, duration, aspect_w=config.aspect_w, aspect_h=config.aspect_h
+        return finish(
+            centre_crop(
+                source_w, source_h, duration, aspect_w=config.aspect_w, aspect_h=config.aspect_h
+            ).segments,
+            [],
+            None,
         )
 
     # Guarantee the segments tile the clip exactly; a gap or overlap would
@@ -168,13 +191,33 @@ def build_crop_path(
 
     segments = [s for s in segments if s.duration_s > 0.01]
 
+    facecam = detect_facecam(
+        tracks,
+        source_w=source_w,
+        source_h=source_h,
+        sampled_frames=round(duration * config.sample_fps),
+    )
+    path = finish(segments, tracks, facecam)
+
     log.info(
         "Reframed %s into %d segment(s): %s",
         video.name,
-        len(segments),
-        ", ".join(s.strategy.value for s in segments),
+        len(path.segments),
+        ", ".join(s.strategy.value for s in path.segments),
     )
-    return CropPath(source_width=source_w, source_height=source_h, segments=segments)
+    return path
+
+
+def _usable_height(video: Path, *, start_s: float, end_s: float, source_h: int) -> int:
+    """Source height above the source's own burned-in subtitles, if it has any."""
+    try:
+        band = detect_subtitle_band(sample_frames(video, start_s=start_s, end_s=end_s))
+    except ImportError as exc:
+        log.warning("Subtitle detection unavailable (%s); using the full height.", exc)
+        return source_h
+    if band is not None:
+        log.info("Source subtitles detected; keeping crops above y=%d.", band)
+    return band if band is not None else source_h
 
 
 def _clip_relative_turns(
